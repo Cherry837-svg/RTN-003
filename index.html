@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Zhivoy Bloknot</title>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <style>
+    :root {
+      --bg-color: #121212;
+      --text-color: #ffffff;
+      --font-size: 20px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body, html {
+      height: 100%;
+      width: 100%;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden;
+      transition: background-color 0.15s ease, color 0.15s ease;
+    }
+    #editor {
+      width: 100%;
+      height: 100%;
+      padding: 24px;
+      padding-top: 60px;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text-color);
+      font-size: var(--font-size);
+      line-height: 1.6;
+      resize: none;
+    }
+    #editor::placeholder {
+      color: var(--text-color);
+      opacity: 0.35;
+    }
+
+    /* Кнопка открытия настроек */
+    #toggle-ui {
+      position: fixed;
+      top: 14px;
+      right: 16px;
+      background: rgba(128, 128, 128, 0.25);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      color: var(--text-color);
+      border: 1px solid rgba(128, 128, 128, 0.35);
+      padding: 8px 14px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: bold;
+      cursor: pointer;
+      z-index: 30;
+    }
+
+    /* Панель настроек (цвета, размер, очистка) */
+    #toolbar {
+      position: fixed;
+      top: 56px;
+      right: 16px;
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+      background: rgba(25, 25, 25, 0.88);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      color: #ffffff;
+      padding: 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      z-index: 25;
+      min-width: 220px;
+    }
+    #toolbar.open {
+      display: flex;
+    }
+    .tool-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 14px;
+    }
+    input[type="color"] {
+      width: 42px;
+      height: 28px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      cursor: pointer;
+    }
+    input[type="range"] {
+      width: 110px;
+      cursor: pointer;
+    }
+    #clear-btn {
+      margin-top: 4px;
+      padding: 10px;
+      border: none;
+      border-radius: 10px;
+      background: #ef4444;
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    #clear-btn.confirm {
+      background: #f59e0b;
+      color: #000000;
+    }
+
+    /* Индикатор статуса сети в углу */
+    #status-badge {
+      position: fixed;
+      bottom: 12px;
+      right: 16px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      opacity: 0.65;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #eab308;
+    }
+    #dot.online { background: #10b981; }
+    #dot.offline { background: #ef4444; }
+  </style>
+</head>
+<body>
+
+  <button id="toggle-ui">Nastroiki</button>
+
+  <div id="toolbar">
+    <div class="tool-row">
+      <span>Fon</span>
+      <input type="color" id="bg-picker" value="#121212">
+    </div>
+    <div class="tool-row">
+      <span>Tekst</span>
+      <input type="color" id="fg-picker" value="#ffffff">
+    </div>
+    <div class="tool-row">
+      <span>Razmer (<span id="size-val">20</span>)</span>
+      <input type="range" id="size-slider" min="12" max="48" value="20">
+    </div>
+    <button id="clear-btn">Ochistit</button>
+  </div>
+
+  <textarea id="editor" placeholder="Nachni pechatat... Dvoynoy tap - polnyy ekran"></textarea>
+
+  <div id="status-badge">
+    <span id="dot"></span>
+    <span id="status-text">Podklyuchenie...</span>
+  </div>
+
+  <script>
+    const TOPIC = 'cherry837/rtn002/2026/live8821';
+    const CLIENT_ID = 'dev_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+
+    const editor = document.getElementById('editor');
+    const toggleUiBtn = document.getElementById('toggle-ui');
+    const toolbar = document.getElementById('toolbar');
+    const bgPicker = document.getElementById('bg-picker');
+    const fgPicker = document.getElementById('fg-picker');
+    const sizeSlider = document.getElementById('size-slider');
+    const sizeVal = document.getElementById('size-val');
+    const clearBtn = document.getElementById('clear-btn');
+    const dot = document.getElementById('dot');
+    const statusText = document.getElementById('status-text');
+
+    let state = {
+      text: localStorage.getItem('bn_text') || '',
+      bg: localStorage.getItem('bn_bg') || '#121212',
+      fg: localStorage.getItem('bn_fg') || '#ffffff',
+      size: localStorage.getItem('bn_size') || '20',
+      sender: CLIENT_ID
+    };
+
+    let syncTimer = null;
+    let confirmTimer = null;
+    let isConfirming = false;
+
+    function applyState(newState, updateInputs = true) {
+      state = { ...state, ...newState };
+      
+      if (editor.value !== state.text) {
+        const start = editor.selectionStart;
+        const end = editor.selectionEnd;
+        editor.value = state.text;
+        try { editor.setSelectionRange(start, end); } catch (e) {}
+      }
+
+      document.documentElement.style.setProperty('--bg-color', state.bg);
+      document.documentElement.style.setProperty('--text-color', state.fg);
+      document.documentElement.style.setProperty('--font-size', state.size + 'px');
+
+      if (updateInputs) {
+        bgPicker.value = state.bg;
+        fgPicker.value = state.fg;
+        sizeSlider.value = state.size;
+      }
+      sizeVal.innerText = state.size;
+
+      localStorage.setItem('bn_text', state.text);
+      localStorage.setItem('bn_bg', state.bg);
+      localStorage.setItem('bn_fg', state.fg);
+      localStorage.setItem('bn_size', state.size);
+    }
+
+    // Применяем сохраненное состояние сразу при старте
+    applyState(state, true);
+
+    // Подключение к MQTT брокеру
+    const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+      clientId: CLIENT_ID,
+      clean: true,
+      reconnectPeriod: 2000
+    });
+
+    client.on('connect', () => {
+      dot.className = 'online';
+      statusText.innerText = 'Onlayn';
+      client.subscribe(TOPIC);
+    });
+
+    client.on('reconnect', () => {
+      dot.className = '';
+      statusText.innerText = 'Perepodklyuchenie...';
+    });
+
+    client.on('offline', () => {
+      dot.className = 'offline';
+      statusText.innerText = 'Oflayn';
+    });
+
+    client.on('message', (topic, message) => {
+      try {
+        const data = JSON.parse(message.toString());
+        if (data && data.sender !== CLIENT_ID) {
+          applyState(data, true);
+        }
+      } catch (e) {}
+    });
+
+    function publishState(immediate = false) {
+      const send = () => {
+        if (client && client.connected) {
+          const payload = JSON.stringify({ ...state, sender: CLIENT_ID });
+          client.publish(TOPIC, payload, { retain: true, qos: 0 });
+        }
+      };
+
+      if (immediate) {
+        clearTimeout(syncTimer);
+        send();
+      } else {
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(send, 70);
+      }
+    }
+
+    // События ввода текста
+    editor.addEventListener('input', () => {
+      state.text = editor.value;
+      localStorage.setItem('bn_text', state.text);
+      publishState(true);
+    });
+
+    // События палитры цветов и размера шрифта
+    bgPicker.addEventListener('input', (e) => {
+      applyState({ bg: e.target.value }, false);
+      publishState(false);
+    });
+
+    fgPicker.addEventListener('input', (e) => {
+      applyState({ fg: e.target.value }, false);
+      publishState(false);
+    });
+
+    sizeSlider.addEventListener('input', (e) => {
+      applyState({ size: e.target.value }, false);
+      publishState(false);
+    });
+
+    // Кнопка очистки с подтверждением
+    clearBtn.addEventListener('click', () => {
+      if (!isConfirming) {
+        isConfirming = true;
+        clearBtn.innerText = 'Tochno?';
+        clearBtn.classList.add('confirm');
+        confirmTimer = setTimeout(() => {
+          isConfirming = false;
+          clearBtn.innerText = 'Ochistit';
+          clearBtn.classList.remove('confirm');
+        }, 3000);
+      } else {
+        clearTimeout(confirmTimer);
+        isConfirming = false;
+        clearBtn.innerText = 'Ochistit';
+        clearBtn.classList.remove('confirm');
+        applyState({ text: '' }, true);
+        publishState(true);
+      }
+    });
+
+    // Открытие и закрытие панели настроек
+    toggleUiBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toolbar.classList.toggle('open');
+    });
+
+    editor.addEventListener('click', () => {
+      toolbar.classList.remove('open');
+    });
+
+    // Полноэкранный режим по двойному тапу / клику
+    function toggleFullScreen() {
+      if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+        if (document.documentElement.requestFullscreen) {
+          document.documentElement.requestFullscreen();
+        } else if (document.documentElement.webkitRequestFullscreen) {
+          document.documentElement.webkitRequestFullscreen();
+        }
+      } else {
+        if (document.exitFullscreen) {
+          document.exitFullscreen();
+        } else if (document.webkitExitFullscreen) {
+          document.webkitExitFullscreen();
+        }
+      }
+    }
+
+    editor.addEventListener('dblclick', toggleFullScreen);
+
+    let lastTap = 0;
+    editor.addEventListener('touchend', (e) => {
+      const currentTime = new Date().getTime();
+      const tapLength = currentTime - lastTap;
+      if (tapLength < 300 && tapLength > 0) {
+        e.preventDefault();
+        toggleFullScreen();
+      }
+      lastTap = currentTime;
+    });
+  </script>
+
+</body>
+</html>
